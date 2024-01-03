@@ -27,7 +27,7 @@ from . import implicit_utils as iu
 # adapted from https://stackoverflow.com/a/49911616
 
 # Helper to make calling field() less verbose
-def kwonly(default=MISSING, **kwargs):
+def kwonly(default=None, **kwargs):
     kwargs.setdefault('metadata', {})
     kwargs['metadata']['kwonly'] = True
     return field(default=default, **kwargs)
