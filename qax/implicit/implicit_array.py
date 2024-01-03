@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, MISSING
 from functools import partial, wraps
 from itertools import chain
 from typing import ClassVar, Optional
@@ -15,12 +15,101 @@ import jax.interpreters.partial_eval as pe
 from jax.tree_util import register_pytree_with_keys_class
 import jax.numpy as jnp
 
+import inspect
+
 from jax._src.typing import DTypeLike, Shape
 
 from .. import constants
 from ..primitives import ArrayValue, get_primitive_handler
 
 from . import implicit_utils as iu
+
+# adapted from https://stackoverflow.com/a/49911616
+
+# Helper to make calling field() less verbose
+def kwonly(default=MISSING, **kwargs):
+    kwargs.setdefault('metadata', {})
+    kwargs['metadata']['kwonly'] = True
+    return field(default=default, **kwargs)
+
+def mydataclass(_cls, *, init=True, **kwargs):
+    if _cls is None:
+        return partial(mydataclass, **kwargs)
+
+    no_generated_init = (not init or '__init__' in _cls.__dict__)
+    _cls = dataclass(_cls, **kwargs)
+    if no_generated_init:
+        # No generated __init__. The user will have to provide __init__,
+        # and they probably already have. We assume their __init__ does
+        # what they want.
+        return _cls
+
+    fields = fields(_cls)
+    if any(field_.metadata.get('kwonly') and not field_.init for field_ in fields):
+        raise TypeError('Non-init field marked kwonly')
+
+    # From this point on, ignore non-init fields - but we don't know
+    # about InitVars yet.
+    init_fields = [field for field in fields if field.init]
+    for i, field_ in enumerate(init_fields):
+        if field_.metadata.get('kwonly'):
+            first_kwonly = field_.name
+            num_kwonly = len(init_fields) - i
+            break
+    else:
+        # No kwonly fields. Why were we called? Assume there was a reason.
+        return _cls
+
+    if not all(field_.metadata.get('kwonly') for field_ in init_fields[-num_kwonly:]):
+        raise TypeError('non-kwonly init fields following kwonly fields')
+
+    required_kwonly = [field_.name for field_ in init_fields[-num_kwonly:]
+                       if field_.default is field_.default_factory is MISSING]
+
+    original_init = _cls.__init__
+
+    # Time to handle InitVars. This is going to get ugly.
+    # InitVars don't show up in fields(). They show up in __annotations__,
+    # but the current dataclasses implementation doesn't understand string
+    # annotations, and we want an implementation that's robust against
+    # changes in string annotation handling.
+    # We could inspect __post_init__, except there doesn't have to be a
+    # __post_init__. (It'd be weird to use InitVars with no __post_init__,
+    # but it's allowed.)
+    # As far as I can tell, that leaves inspecting __init__ parameters as
+    # the only option.
+
+    init_params = tuple(inspect.signature(original_init).parameters)
+    if init_params[-num_kwonly] != first_kwonly:
+        # InitVars following kwonly fields. We could adopt a convention like
+        # "InitVars after kwonly are kwonly" - in fact, we could have adopted
+        # "all fields after kwonly are kwonly" too - but it seems too likely
+        # to cause confusion with inheritance.
+        raise TypeError('InitVars after kwonly fields.')
+    # -1 to exclude self from this count.
+    max_positional = len(init_params) - num_kwonly - 1
+
+    @wraps(original_init)
+    def __init__(self, *args, **kwargs):
+        if len(args) > max_positional:
+            raise TypeError('Too many positional arguments')
+        check_required_kwargs(kwargs, required_kwonly)
+        return original_init(self, *args, **kwargs)
+    _cls.__init__ = __init__
+
+    return _cls
+
+def check_required_kwargs(kwargs, required):
+    # Not strictly necessary, but if we don't do this, error messages for
+    # required kwonly args will list them as positional instead of
+    # keyword-only.
+    missing = [name for name in required if name not in kwargs]
+    if not missing:
+        return
+    # We don't bother to exactly match the built-in logic's exception
+    raise TypeError(f"__init__ missing required keyword-only argument(s): {missing}")
+
+#adapted code
 
 def _with_implicit_flat(fun: lu.WrappedFun) -> lu.WrappedFun:
   # Splitting to avoid leaks based on https://github.com/google/jax/blob/0dffdf4645db7bf7a9fadd4bcfe9ec0368a8ecb9/jax/_src/interpreters/batching.py#L539
@@ -64,7 +153,7 @@ def use_implicit_args(f):
 def aux_field(metadata=None, **kwargs):
     metadata = dict(metadata) if metadata else {}
     metadata['implicit_array_aux'] = True
-    return field(metadata=metadata, **kwargs)
+    return kwonly(field(metadata=metadata, **kwargs))
 
 class UninitializedAval(Exception):
     def __init__(self, kind):
@@ -99,14 +188,14 @@ def _aval_discovery_context():
     finally:
         _aval_discovery.reset(token)
 
-@dataclass
+@mydataclass
 class _ImplicitArrayBase(ArrayValue,ABC):
     commute_ops : ClassVar[bool] = True
     default_shape : ClassVar[Optional[Shape]] = None
     default_dtype : ClassVar[Optional[DTypeLike]] = None
 
-    shape : Optional[Shape] = aux_field(kw_only=True, default=None)
-    dtype : DTypeLike = aux_field(kw_only=True, default=None)
+    shape : Optional[Shape] = aux_field(default=None)
+    dtype : DTypeLike = aux_field(default=None)
 
 @dataclass
 class ImplicitArray(_ImplicitArrayBase):
