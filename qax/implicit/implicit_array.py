@@ -153,7 +153,7 @@ def use_implicit_args(f):
 def aux_field(metadata=None, **kwargs):
     metadata = dict(metadata) if metadata else {}
     metadata['implicit_array_aux'] = True
-    return kwonly(field(metadata=metadata, **kwargs))
+    return kwonly(metadata=metadata, **kwargs)
 
 class UninitializedAval(Exception):
     def __init__(self, kind):
