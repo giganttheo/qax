@@ -44,13 +44,13 @@ def mydataclass(_cls, *, init=True, **kwargs):
         # what they want.
         return _cls
 
-    fields = fields(_cls)
-    if any(field_.metadata.get('kwonly') and not field_.init for field_ in fields):
+    fields_ = fields(_cls)
+    if any(field_.metadata.get('kwonly') and not field_.init for field_ in fields_):
         raise TypeError('Non-init field marked kwonly')
 
     # From this point on, ignore non-init fields - but we don't know
     # about InitVars yet.
-    init_fields = [field for field in fields if field.init]
+    init_fields = [field for field in fields_ if field.init]
     for i, field_ in enumerate(init_fields):
         if field_.metadata.get('kwonly'):
             first_kwonly = field_.name
